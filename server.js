@@ -64,6 +64,36 @@ app.get("/match-state", (req, res) => {
 	});
 });
 
+// Example shape: { match_name: "abc", player_id: "1", state_string: "abc123==" }
+app.post("/submit-placement", async (req, res) => {
+	const { match_name, player_id, state_string } = req.body;
+
+	if (!match_name || !player_id || !state_string) {
+		return res.status(400).json({ error: "Missing fields" });
+	}
+
+	if (!matches[match_name]) {
+		matches[match_name] = {};
+	}
+
+	matches[match_name][player_id] = state_string;
+
+	const playersSubmitted = Object.keys(matches[match_name]).length;
+
+	if (playersSubmitted === 2) {
+		// Combine the two states into one full game state
+		const [p1, p2] = Object.values(matches[match_name]);
+		const combined_state = p1 +"_"+ p2;
+
+		// Save the full state
+		matchStates[match_name] = combined_state;
+
+		return res.json({ status: "both_ready", game_state: combined_state });
+	}
+
+	res.json({ status: "waiting_for_other_player" });
+});
+
 app.listen(PORT, () => {
 	console.log(`Server running on port ${PORT}`);
 });
