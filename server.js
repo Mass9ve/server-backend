@@ -8,20 +8,22 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(bodyParser.json());
 
-let matches = {}; // Stores all matches
+let matches = {};       // match_id -> { players, placements, history, latest_state }
+let matchStates = {};   // match_id -> combined_state
 
-// Create match with custom ID
+// Create match
 app.post("/create-match", (req, res) => {
-	const { match_id, player_name } = req.body;
+	const { match_id, player_info } = req.body;
 
 	if (matches[match_id]) {
 		return res.status(400).json({ error: "Match ID already exists" });
 	}
 
 	matches[match_id] = {
-		players: [player_name],
+		players: [player_info],
+		placements: {},
 		latest_state: "",
-		history: [],
+		history: []
 	};
 
 	res.json({ success: true });
@@ -29,27 +31,39 @@ app.post("/create-match", (req, res) => {
 
 // Join existing match
 app.post("/join-match", (req, res) => {
-	const { match_id, player_name } = req.body;
+	const { match_id, player_info } = req.body;
 	const match = matches[match_id];
 
 	if (!match) return res.status(404).json({ error: "Match not found" });
 	if (match.players.length >= 2) return res.status(400).json({ error: "Match is full" });
 
-	match.players.push(player_name);
+	match.players.push(player_info);
 	res.json({ success: true });
 });
 
-// Submit game state
-app.post("/submit-state", (req, res) => {
-	const { match_id, state } = req.body;
-	const match = matches[match_id];
+// Submit placement (used during placement phase)
+app.post("/submit-placement", (req, res) => {
+	const { match_id, player_id, state_string } = req.body;
 
+	if (!match_id || !player_id || !state_string) {
+		return res.status(400).json({ error: "Missing fields" });
+	}
+
+	const match = matches[match_id];
 	if (!match) return res.status(404).json({ error: "Match not found" });
 
-	match.latest_state = state;
-	match.history.push(state);
+	match.placements[player_id] = state_string;
 
-	res.json({ success: true });
+	if (Object.keys(match.placements).length === 2) {
+		const [p1, p2] = Object.values(match.placements);
+		const combined_state = `${p1}_${p2}`;
+		match.latest_state = combined_state;
+		matchStates[match_id] = combined_state;
+
+		return res.json({ status: "both_ready", game_state: combined_state });
+	}
+
+	res.json({ status: "waiting_for_other_player" });
 });
 
 // Get latest game state
@@ -60,38 +74,8 @@ app.get("/match-state", (req, res) => {
 
 	res.json({
 		latest_state: match.latest_state,
-		players: match.players,
+		players: match.players
 	});
-});
-
-// Example shape: { match_name: "abc", player_id: "1", state_string: "abc123==" }
-app.post("/submit-placement", async (req, res) => {
-	const { match_name, player_id, state_string } = req.body;
-
-	if (!match_name || !player_id || !state_string) {
-		return res.status(400).json({ error: "Missing fields" });
-	}
-
-	if (!matches[match_name]) {
-		matches[match_name] = {};
-	}
-
-	matches[match_name][player_id] = state_string;
-
-	const playersSubmitted = Object.keys(matches[match_name]).length;
-
-	if (playersSubmitted === 2) {
-		// Combine the two states into one full game state
-		const [p1, p2] = Object.values(matches[match_name]);
-		const combined_state = p1 +"_"+ p2;
-
-		// Save the full state
-		matchStates[match_name] = combined_state;
-
-		return res.json({ status: "both_ready", game_state: combined_state });
-	}
-
-	res.json({ status: "waiting_for_other_player" });
 });
 
 app.listen(PORT, () => {
