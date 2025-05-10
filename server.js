@@ -1,151 +1,101 @@
-const express = require("express");
-const cors = require("cors");
-const bodyParser = require("body-parser");
-const redis = require("redis");
-
+const express = require('express');
 const app = express();
-const PORT = process.env.PORT || 3000;
+const port = 3000;
 
-// Middleware setup
-app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-// Initialize Redis client
-const redisClient = redis.createClient();
+const matches = new Map();
 
-redisClient.on("error", (err) => {
-  console.error("Redis error:", err);
-});
-
-// Helper function to convert integer to hexadecimal string
+// Utility function to convert an integer to a hexadecimal string
 function intToHex(intValue) {
-  return intValue.toString(16);
+  return intValue.toString(16).toUpperCase();
 }
 
-// Endpoint to create a new match
-app.post("/create-match", async (req, res) => {
-  const { match_id, player_info } = req.body;
+// Function to encode the game state
+function gameToBase64(currentTurn, gameState) {
+  let intData = 1 << 6; // Sets the 7th bit
 
-  if (!match_id || !player_info) {
-    return res.status(400).json({ error: "Missing match_id or player_info" });
-  }
-
-  const matchKey = `match:${match_id}`;
-
-  // Check if match already exists
-  const exists = await redisClient.exists(matchKey);
-  if (exists) {
-    return res.status(400).json({ error: "Match ID already exists" });
-  }
-
-  // Initialize match data
-  const matchData = {
-    players: JSON.stringify([player_info]),
-    placements: JSON.stringify({}),
-    latest_state: "",
-    history: JSON.stringify([]),
+  const stateMap = {
+    'game_start': 0,
+    'enter_code': 1,
+    'placement_phase': 3,
+    'playing': 4,
+    'game_over': 5
   };
 
-  await redisClient.hSet(matchKey, matchData);
+  const stateCode = stateMap[gameState] || 0;
 
-  res.json({ success: true });
-});
+  intData |= (currentTurn & 0b1) << 0;   // 1 bit for current turn
+  intData |= (stateCode & 0b1111) << 1;  // 4 bits for game state
 
-// Endpoint to join an existing match
-app.post("/join-match", async (req, res) => {
-  const { match_id, player_info } = req.body;
+  return intToHex(intData);
+}
 
-  if (!match_id || !player_info) {
-    return res.status(400).json({ error: "Missing match_id or player_info" });
-  }
+// Function to combine game and player states into a single string
+function combineToBase64(game, p1, p2) {
+  return `${game}_${p1}_${p2}`;
+}
 
-  const matchKey = `match:${match_id}`;
-
-  const matchExists = await redisClient.exists(matchKey);
-  if (!matchExists) {
-    return res.status(404).json({ error: "Match not found" });
-  }
-
-  const playersData = await redisClient.hGet(matchKey, "players");
-  const players = JSON.parse(playersData);
-
-  if (players.length >= 2) {
-    return res.status(400).json({ error: "Match is full" });
-  }
-
-  players.push(player_info);
-  await redisClient.hSet(matchKey, "players", JSON.stringify(players));
-
-  res.json({ success: true });
-});
-
-// Endpoint to submit player placement
-app.post("/submit-placement", async (req, res) => {
+// Endpoint to handle placement submissions
+app.post('/submit-placement', (req, res) => {
   const { match_id, player_id, state_string } = req.body;
 
-  if (!match_id || player_id === undefined || !state_string) {
-    return res.status(400).json({ error: "Missing fields" });
+  if (!matches.has(match_id)) {
+    matches.set(match_id, {
+      players: {},
+      current_turn: 0,
+      game_state: 'placement_phase'
+    });
   }
 
-  const matchKey = `match:${match_id}`;
+  const match = matches.get(match_id);
+  match.players[player_id] = state_string;
 
-  const matchExists = await redisClient.exists(matchKey);
-  if (!matchExists) {
-    return res.status(404).json({ error: "Match not found" });
+  if (Object.keys(match.players).length === 2) {
+    // Both players have submitted their placements
+    const gameStateString = gameToBase64(match.current_turn, match.game_state);
+    const p0 = match.players['0'] || '';
+    const p1 = match.players['1'] || '';
+    const fullState = combineToBase64(gameStateString, p0, p1);
+
+    res.json({
+      status: 'both_ready',
+      game_state: fullState
+    });
+  } else {
+    // Waiting for the other player
+    res.json({
+      status: 'waiting_for_other_player'
+    });
   }
-
-  const placementsData = await redisClient.hGet(matchKey, "placements");
-  const placements = JSON.parse(placementsData || "{}");
-
-  placements[player_id] = state_string;
-  await redisClient.hSet(matchKey, "placements", JSON.stringify(placements));
-
-  if (Object.keys(placements).length === 2) {
-    // Both players have submitted placements
-    const p0 = placements["0"];
-    const p1 = placements["1"];
-
-    // Construct game state
-    const current_turn = 0; // or randomize between 0 and 1
-    const game_state_code = 4; // 'playing' state
-    const game_state_bits = (1 << 6) | ((current_turn & 0b1) << 0) | ((game_state_code & 0b1111) << 1);
-    const game_base64 = intToHex(game_state_bits);
-    const combined_state = `${game_base64}_${p0}_${p1}`;
-
-    await redisClient.hSet(matchKey, "latest_state", combined_state);
-
-    return res.json({ status: "both_ready", game_state: combined_state });
-  }
-
-  res.json({ status: "waiting_for_other_player" });
 });
 
-// Endpoint to retrieve the latest game state
-app.get("/match-state", async (req, res) => {
+// Endpoint to handle state submissions during gameplay
+app.post('/submit-state', (req, res) => {
+  const { match_id, state } = req.body;
+
+  if (!matches.has(match_id)) {
+    return res.status(404).json({ error: 'Match not found' });
+  }
+
+  const match = matches.get(match_id);
+  match.latest_state = state;
+
+  res.json({ status: 'state_updated' });
+});
+
+// Endpoint to retrieve the latest match state
+app.get('/match-state', (req, res) => {
   const { match_id } = req.query;
 
-  if (!match_id) {
-    return res.status(400).json({ error: "Missing match_id" });
+  if (!matches.has(match_id)) {
+    return res.status(404).json({ error: 'Match not found' });
   }
 
-  const matchKey = `match:${match_id}`;
-
-  const matchExists = await redisClient.exists(matchKey);
-  if (!matchExists) {
-    return res.status(404).json({ error: "Match not found" });
-  }
-
-  const latest_state = await redisClient.hGet(matchKey, "latest_state");
-  const playersData = await redisClient.hGet(matchKey, "players");
-  const players = JSON.parse(playersData || "[]");
-
-  res.json({
-    latest_state: latest_state || "",
-    players: players,
-  });
+  const match = matches.get(match_id);
+  res.json({ latest_state: match.latest_state || '' });
 });
 
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(port, () => {
+  console.log(`Server is running on port ${port}`);
 });
