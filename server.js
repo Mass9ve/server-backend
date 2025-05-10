@@ -25,7 +25,7 @@ app.post("/create-match", (req, res) => {
 	matches[match_id] = {
 		players: [player_info],
 		placements: {},
-		latest_state: "",
+		game_state: "",
 		history: []
 	};
 
@@ -81,11 +81,11 @@ app.post("/submit-placement", (req, res) => {
 		const int_data = (1 << 6) | ((current_turn & 0b1) << 0) | ((game_state_code & 0b1111) << 1);
 		const header = intToBase64(int_data);
 
-		match.latest_state = `${header}_${p0}_${p1}`;
+		match.game_state = `${header}_${p0}_${p1}`;
 
 		return res.json({
 			status: "both_ready",
-			game_state: match.latest_state
+			game_state: match.game_state
 		});
 	}
 
@@ -107,7 +107,7 @@ app.get("/match-state", (req, res) => {
 	}
 
 	res.json({
-		latest_state: match.latest_state || "",
+		game_state: match.game_state || "",
 		players: match.players
 	});
 });
